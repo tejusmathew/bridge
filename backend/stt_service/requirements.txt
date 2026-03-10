@@ -5,5 +5,5 @@ python-dotenv
 vosk
 pydub
 pydantic
-pyaudioop
+audioop-lts
 requests

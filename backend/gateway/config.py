@@ -12,7 +12,7 @@ SLR_URL = os.getenv("SLR_URL", "http://localhost:8006/generate-transcript")
 
 # Output Layer
 TTS_URL = os.getenv("TTS_URL", "http://localhost:8001/generate-speech")
-AVATAR_URL = os.getenv("AVATAR_URL", "http://localhost:5000/generate-sign-video")
+AVATAR_URL = os.getenv("AVATAR_URL", "http://localhost:5003/generate-sign-video")
 
 # Internal microservice auth token
 AUTH_TOKEN = os.getenv("AUTH_TOKEN", "bridge-dev-token-123")

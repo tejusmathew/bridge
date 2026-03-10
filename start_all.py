@@ -71,8 +71,8 @@ def start_all():
     print("\nAll services commanded to start. Waiting 10 seconds for boot up...")
     time.sleep(10)
     print("\n=======================================================")
-    print("🚀 Startup sequence complete. Servers should be live.")
-    print("✅ Frontend accessible at: http://localhost:5173")
+    print("Startup sequence complete. Servers should be live.")
+    print("Frontend accessible at: http://localhost:5173")
     print("=======================================================\n")
     print("Press Ctrl+C to terminate all services.")
     

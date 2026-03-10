@@ -1,14 +1,22 @@
 import logging
 
 import httpx
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 import config
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["AI Services"])
+
+
+class TextRequest(BaseModel):
+    text: str
+    language: str = "en"
+    voice: str = "default"
+    speed: float = 1.0
 
 # ── Speech-to-Text ──────────────────────────────────────────────
 
@@ -59,11 +67,11 @@ async def sign_to_text(video: UploadFile = File(...)):
 # ── Text-to-Sign ────────────────────────────────────────────────
 
 @router.post("/text-to-sign")
-async def text_to_sign(text: str = Form(...)):
+async def text_to_sign(request: TextRequest):
     """Proxy directly to Avatar API"""
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            avatar_res = await client.post(config.AVATAR_URL, headers=config.HEADERS, json={"text": text})
+            avatar_res = await client.post(config.AVATAR_URL, headers=config.HEADERS, json={"text": request.text})
             if avatar_res.status_code != 200:
                 raise HTTPException(status_code=avatar_res.status_code, detail=f"Avatar Service Error: {avatar_res.text}")
             return JSONResponse(content=avatar_res.json())
@@ -74,11 +82,11 @@ async def text_to_sign(text: str = Form(...)):
 # ── Text-to-Speech ──────────────────────────────────────────────
 
 @router.post("/text-to-speech")
-async def text_to_speech(text: str = Form(...)):
+async def text_to_speech(request: TextRequest):
     """Proxy directly to TTS API"""
     try:
         async with httpx.AsyncClient(timeout=180.0) as client:
-            tts_res = await client.post(config.TTS_URL, headers=config.HEADERS, json={"text": text})
+            tts_res = await client.post(config.TTS_URL, headers=config.HEADERS, json={"text": request.text, "language": request.language, "voice": request.voice, "speed": request.speed})
             if tts_res.status_code != 200:
                 raise HTTPException(status_code=tts_res.status_code, detail=f"TTS Service Error: {tts_res.text}")
             return JSONResponse(content=tts_res.json())

@@ -41,6 +41,7 @@ def health():
 
 app.include_router(ai_routes.router)        # /api/*
 app.include_router(auth_routes.router)       # /auth/*
+app.include_router(auth_routes.router, prefix="/api") # /api/auth/*
 app.include_router(messaging_routes.router)  # /conversations, /messages
 app.include_router(ws_routes.router)         # /ws
 

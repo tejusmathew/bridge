@@ -1,39 +1,19 @@
 {
-  "name": "bridgeapp",
+  "name": "bridge-avatar-service",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Bridge Avatar Service — sign language video stitching via FFmpeg",
+  "main": "server.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "echo \"No tests specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "bootstrap": "^5.3.8",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "font-awesome": "^4.7.0",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
-    "react-input-slider": "^6.0.1",
-    "react-router-dom": "^7.13.1",
-    "react-scripts": "^5.0.1",
-    "react-speech-recognition": "^4.0.1",
-    "three": "^0.183.1",
-    "web-vitals": "^5.1.0"
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "ffmpeg-static": "^5.3.0",
+    "uuid": "^13.0.0"
   }
 }

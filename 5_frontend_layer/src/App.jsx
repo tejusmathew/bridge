@@ -7,10 +7,10 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/login" element={<Login />} />
+        <Route path="/login" element={<Navigate to="/chat" replace />} />
         <Route path="/chat" element={<ChatApp />} />
-        {/* Default route redirects to login */}
-        <Route path="*" element={<Navigate to="/login" replace />} />
+        {/* Default route redirects to chat */}
+        <Route path="*" element={<Navigate to="/chat" replace />} />
       </Routes>
     </BrowserRouter>
   );
