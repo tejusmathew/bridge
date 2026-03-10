@@ -1,0 +1,249 @@
+# Bridge Platform — Module-by-Module Deep Dive
+
+The Bridge Platform is an accessible messaging application built as a **microservices architecture**. It translates between speech, text, and sign language in real-time, tailoring the UI to four user profiles: **General**, **Deaf**, **Blind**, and **Mute**.
+
+```mermaid
+graph LR
+    FE["5. Frontend Layer<br/>(React + Vite)"]
+    GW["3. Gateway API<br/>(FastAPI :8000)"]
+    STT["1. STT API<br/>(Vosk :8002)"]
+    SLR["2. SLR API<br/>(TensorFlow :8003)"]
+    TTS["4a. TTS API<br/>(gTTS :8001)"]
+    AVA["4b. Sign Avatar API<br/>(Puppeteer :5003)"]
+
+    FE -->|REST + WS| GW
+    GW -->|proxy| STT
+    GW -->|proxy| SLR
+    GW -->|proxy| TTS
+    GW -->|proxy| AVA
+    FE -.->|direct call| TTS
+    FE -.->|direct call| AVA
+```
+
+---
+
+## Layer 1 — Input Layer: Speech-to-Text (STT) API
+
+| | |
+|---|---|
+| **Port** | `8002` |
+| **Framework** | FastAPI (Python) |
+| **Engine** | [Vosk](https://alphacephei.com/vosk/) offline speech recognition |
+| **Files** | [stt_main.py](file:///d:/bridgeapp/1_input_layer/stt_api/stt_main.py), [audio_processor.py](file:///d:/bridgeapp/1_input_layer/stt_api/audio_processor.py) |
+
+### Core Functionality
+
+This module converts **audio recordings → text**. It is the entry point for voice-input users.
+
+**Request flow:**
+
+1. **Receive audio** — endpoint `POST /speech-to-text` accepts any audio file (WAV, MP3, OGG, etc.) via multipart upload, along with optional `language`, `sample_rate`, and `noise_reduction` params.
+2. **Convert to WAV** — `audio_processor.convert_to_wav()` shells out to **FFmpeg** to transcode the upload to 16 kHz mono WAV, the exact format Vosk expects. This bypasses Python's `audioop` module that was removed in Python 3.13.
+3. **Transcribe** — Opens the WAV with the `wave` module, verifies it's mono PCM, then feeds 4000-frame chunks to a `KaldiRecognizer`. Partial results accumulate; a final `FinalResult()` call flushes remaining audio.
+4. **Return** — JSON response with `transcribed_text`, `confidence`, and `language`.
+
+**Authentication:** Bearer token validated in-line (`bridge-dev-token-123`).
+
+**Model:** Uses a pre-downloaded Vosk model stored in the `model/` directory (loaded once at startup into `vosk_model`).
+
+---
+
+## Layer 2 — AI Processing Layer: Sign Language Recognition (SLR) API
+
+| | |
+|---|---|
+| **Port** | `8003` |
+| **Framework** | FastAPI (Python) |
+| **Engine** | TensorFlow/Keras CNN ([isl_model.h5](file:///d:/bridgeapp/isl_model.h5)) |
+| **Files** | [slr_main.py](file:///d:/bridgeapp/2_ai_processing_layer/sign_recognition_api/slr_main.py), [video_processor.py](file:///d:/bridgeapp/2_ai_processing_layer/sign_recognition_api/video_processor.py) |
+
+### Core Functionality
+
+This module converts **sign language video → text** by classifying individual frames against a 23-class ISL (Indian Sign Language) static alphabet model.
+
+**Request flow:**
+
+1. **Receive video** — endpoint `POST /video-to-text` accepts a video file upload.
+2. **Extract frames** — `video_processor.extract_and_preprocess_frames()` uses **OpenCV** to:
+   - Read frames, sampling every 5th frame (`skip_frames=5`) to reduce redundancy.
+   - Convert BGR → RGB.
+   - Resize each frame to **128×128** pixels (the model's expected input).
+   - Normalize pixel values to `[0, 1]` range.
+   - Return as a NumPy array of shape [(N, 128, 128, 3)](file:///d:/bridgeapp/5_frontend_layer/src/App.jsx#6-18).
+3. **Predict** — Batch-predict all frames through the Keras CNN. If TensorFlow isn't available, a **mock engine** returns hardcoded letters for integration testing.
+4. **Map predictions** — [map_predictions_to_letters()](file:///d:/bridgeapp/2_ai_processing_layer/sign_recognition_api/video_processor.py#43-71) takes the softmax output, picks the argmax for each frame, and maps the index to an ISL letter via a 23-label lookup: `A B C D E F G H I K L M N O P Q R S T U V W Y` (skipping J, X, Z — motion-based signs).
+5. **Smooth** — [smooth_predictions()](file:///d:/bridgeapp/2_ai_processing_layer/sign_recognition_api/video_processor.py#72-86) uses **majority voting** (`Counter.most_common(1)`) across all detected letters to return a single dominant character.
+6. **Return** — JSON with `transcribed_text` (one letter), `confidence`, `language`.
+
+> [!NOTE]
+> A separate, more advanced inference pipeline runs at **port 8006** (`D:\final_sign_to_txt\inference_simple`) for word/phrase-level recognition using MediaPipe keypoint extraction + LSTM. The frontend calls this directly via `bridgeApi.signVideoToTranscript()`.
+
+---
+
+## Layer 3 — Communication Kernel: Gateway API
+
+| | |
+|---|---|
+| **Port** | `8000` |
+| **Framework** | FastAPI (Python) |
+| **Files** | [gateway_main.py](file:///d:/bridgeapp/3_communication_kernel/gateway_api/gateway_main.py), [config.py](file:///d:/bridgeapp/3_communication_kernel/gateway_api/config.py) |
+
+### Core Functionality
+
+The Gateway is the **central router and WebSocket hub**. It has two distinct roles:
+
+#### A) REST Proxy (Microservice Router)
+
+Four proxy endpoints forward requests from the frontend to the appropriate backend service using **httpx** async HTTP:
+
+| Gateway Endpoint | Target Service | Config Key |
+|---|---|---|
+| `POST /api/speech-to-text` | STT API `:8002` | `STT_URL` |
+| `POST /api/sign-to-text` | SLR API `:8003` | `SLR_URL` |
+| `POST /api/text-to-speech` | TTS API `:8001` | `TTS_URL` |
+| `POST /api/text-to-sign` | Avatar API `:5003` | `AVATAR_URL` |
+
+Each proxy reads the upstream file/form data, re-sends it to the target microservice with the internal auth header, and pipes the JSON response back to the caller. All requests have a **180-second timeout**.
+
+#### B) WebSocket Signaling (Real-Time Messaging)
+
+The [ConnectionManager](file:///d:/bridgeapp/3_communication_kernel/gateway_api/gateway_main.py#18-36) class implements a **WhatsApp-style peer-to-peer message relay**:
+
+- **Connect** — `WS /ws/{username}` accepts a WebSocket, stores it in `active_connections[username]`.
+- **Message relay** — When a message arrives as `{"to": "recipient", "payload": "..."}`, the gateway tags it with `"from": sender_username` and forwards it to the recipient's WebSocket via [send_personal_message()](file:///d:/bridgeapp/3_communication_kernel/gateway_api/gateway_main.py#33-36).
+- **Disconnect** — On `WebSocketDisconnect`, removes the connection from the map.
+
+**CORS** is configured wide-open for local development (`allow_origins=["*"]`).
+
+**Config** ([config.py](file:///d:/bridgeapp/3_communication_kernel/gateway_api/config.py)) — All microservice URLs and the shared auth token are configured via environment variables with localhost defaults.
+
+---
+
+## Layer 4a — Output Layer: Text-to-Speech (TTS) API
+
+| | |
+|---|---|
+| **Port** | `8001` |
+| **Framework** | FastAPI (Python) |
+| **Engine** | Google TTS (`gTTS`) primary, [pyttsx3](file:///d:/bridgeapp/4_output_layer/tts_api/tts_main.py#65-73) fallback |
+| **Files** | [tts_main.py](file:///d:/bridgeapp/4_output_layer/tts_api/tts_main.py), [text_processor.py](file:///d:/bridgeapp/4_output_layer/tts_api/text_processor.py) |
+
+### Core Functionality
+
+Converts **text → spoken audio MP3**. Primary output for Blind users.
+
+**Request flow:**
+
+1. **Receive request** — `POST /generate-speech` accepts a JSON body: `{text, language, voice, speed}`.
+2. **Normalize text** — `text_processor.normalize_text()` cleans whitespace and expands common abbreviations (`Dr.` → `Doctor`, `e.g.` → `for example`, etc.) for natural-sounding speech.
+3. **Generate audio (two-strategy fallback):**
+   - **Strategy 1 (Online):** `gTTS` — Google's Text-to-Speech service. High quality, thread-safe. Generates an MP3 file.
+   - **Strategy 2 (Offline fallback):** [pyttsx3](file:///d:/bridgeapp/4_output_layer/tts_api/tts_main.py#65-73) — Local SAPI5/espeak engine. Runs in a **separate `multiprocessing.Process`** with a 10-second timeout to avoid COM threading deadlocks in FastAPI's async workers.
+4. **Serve audio** — The [audio/](file:///d:/bridgeapp/4_output_layer/tts_api/tts_main.py#50-58) directory is mounted as a static file directory. Returns `audio_url` pointing to `http://localhost:8001/audio/{uuid}.mp3`.
+
+---
+
+## Layer 4b — Output Layer: Sign Avatar API
+
+| | |
+|---|---|
+| **Port** | `5003` |
+| **Framework** | Express.js (Node.js) |
+| **Engine** | Puppeteer (headless Chrome) + React 3D avatar build |
+| **Files** | [server.js](file:///d:/bridgeapp/4_output_layer/sign_avatar_api/server.js) |
+
+### Core Functionality
+
+Converts **text → sign language avatar video (WebM)**. Primary output for Deaf users.
+
+**Request flow:**
+
+1. **Receive request** — `POST /generate-sign-video` accepts `{text: "..."}` JSON body.
+2. **Launch headless browser** — Puppeteer opens a headless Chrome instance with GPU emulation (`swiftshader`), no sandbox, and autoplay enabled.
+3. **Render the avatar** — Navigates to `http://localhost:5003/headless?text=...`, which serves a pre-built React application from the `build/` directory. This React app renders a 3D sign language avatar that performs the signs for each letter/word.
+4. **Wait for completion** — Polls `window.renderComplete === true` (set by the React app when the avatar finishes signing).
+5. **Extract video blob** — JavaScript within the headless page captures the rendering as a video blob (`window.capturedVideoBlob`), reads it via `FileReader` as a base64 data URL, and passes it back to Node.js.
+6. **Save and serve** — Decodes the base64 data, writes it as `{uuid}.webm` to `public/videos/`, and returns the URL.
+
+> [!IMPORTANT]
+> This is a computationally heavy process — each request launches a full Chrome instance, renders 3D WebGL content, and records a video. The 300-second timeout reflects this.
+
+---
+
+## Layer 5 — Frontend Layer (React + Vite)
+
+| | |
+|---|---|
+| **Port** | `5173` (Vite dev server) |
+| **Framework** | React 18 + Vite |
+| **Files** | [App.jsx](file:///d:/bridgeapp/5_frontend_layer/src/App.jsx), [Login.jsx](file:///d:/bridgeapp/5_frontend_layer/src/pages/Login.jsx), [ChatApp.jsx](file:///d:/bridgeapp/5_frontend_layer/src/pages/ChatApp.jsx), [ChatInput.jsx](file:///d:/bridgeapp/5_frontend_layer/src/components/ChatInput.jsx), [MessageList.jsx](file:///d:/bridgeapp/5_frontend_layer/src/components/MessageList.jsx), [bridgeApi.js](file:///d:/bridgeapp/5_frontend_layer/src/api/bridgeApi.js), [crypto.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/crypto.js), [storage.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/storage.js), [useUIReader.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/useUIReader.js) |
+
+### Core Functionality
+
+The frontend is a **WhatsApp-style chat interface** with accessibility-adaptive features.
+
+#### 5.1 Routing ([App.jsx](file:///d:/bridgeapp/5_frontend_layer/src/App.jsx))
+- `/login` → Login page
+- `/chat` → Chat interface
+- `*` → Redirects to `/login`
+
+#### 5.2 Login ([Login.jsx](file:///d:/bridgeapp/5_frontend_layer/src/pages/Login.jsx))
+- User enters a **username** and selects a **profile** (General / Deaf / Blind / Mute).
+- An AES encryption key is auto-derived from the username via [deriveKey()](file:///d:/bridgeapp/5_frontend_layer/src/utils/crypto.js#3-9) — `SHA-256(username_secure_salt_2024)`.
+- Credentials stored in `sessionStorage` (ephemeral, cleared on tab close).
+
+#### 5.3 Chat UI ([ChatApp.jsx](file:///d:/bridgeapp/5_frontend_layer/src/pages/ChatApp.jsx))
+- **Contact sidebar** with an "Add Contact" button (adds by exact username).
+- **WebSocket connection** — Connects to `ws://localhost:8000/ws/{username}` on mount. Incoming messages are decrypted and saved to IndexedDB.
+- **Message sending** — Messages are AES-encrypted before being sent over the WebSocket as `{to, payload}`.
+- **Bot simulation** — Messages to "Bridge AI Assistant" auto-reply after 1 second for testing.
+
+#### 5.4 Chat Input ([ChatInput.jsx](file:///d:/bridgeapp/5_frontend_layer/src/components/ChatInput.jsx))
+Supports **four input methods**:
+1. **Text** — Standard keyboard input with Enter-to-send.
+2. **Audio recording** — Uses `MediaRecorder` API to capture microphone audio; sends to STT API → transcribes → sends as text message.
+3. **Video recording** — Records camera video for sign language; sends to the sign recognition API for transcription.
+4. **Video upload** — Upload a pre-recorded sign language video file; sends to the inference pipeline at port 8006 ([signVideoToTranscript](file:///d:/bridgeapp/5_frontend_layer/src/api/bridgeApi.js#90-105)).
+
+#### 5.5 Message Display ([MessageList.jsx](file:///d:/bridgeapp/5_frontend_layer/src/components/MessageList.jsx))
+The [DynamicMessageBubble](file:///d:/bridgeapp/5_frontend_layer/src/components/MessageList.jsx#5-98) component **adapts per user profile**:
+
+| Profile | Available translation actions on incoming messages |
+|---|---|
+| **General** | Plain text only |
+| **Blind** | 🔊 "Audio" button → calls TTS API → attaches audio player |
+| **Deaf** | 🤟 "Sign-Video" button → calls Avatar API → attaches video player |
+| **Mute** | Both 🔊 Audio and 🤟 Sign-Video buttons |
+
+Rendered media (audio/video) is embedded inline in the message bubble.
+
+#### 5.6 Encryption ([crypto.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/crypto.js))
+- **Key derivation** — `SHA-256(secret)` via CryptoJS.
+- **Encrypt** — `AES.encrypt(plaintext, key)`.
+- **Decrypt** — `AES.decrypt(ciphertext, key)`. Returns `[Encrypted Message - Key Mismatch]` on failure.
+
+#### 5.7 Storage ([storage.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/storage.js))
+- Uses **IndexedDB** (via `idb-keyval`) for persistent storage.
+- All messages are **encrypted before saving** and **decrypted on read**.
+- Contacts are stored alongside a default "Bridge AI Assistant" contact.
+
+#### 5.8 Accessibility Reader ([useUIReader.js](file:///d:/bridgeapp/5_frontend_layer/src/utils/useUIReader.js))
+- A React hook that provides a `speak()` function.
+- **Only active for the Blind profile** — uses the browser's `SpeechSynthesis` API to read out UI events (e.g., "New message from Alice", "Selected conversation with Bob").
+
+---
+
+## Orchestration: [start_all.py](file:///d:/bridgeapp/start_all.py)
+
+Launches **all 6 services** simultaneously using `subprocess.Popen`:
+
+| Service | Port | Command |
+|---|---|---|
+| Sign Avatar Server | 5003 | `node server.js` |
+| TTS API | 8001 | `uvicorn tts_main:app --port 8001` |
+| STT API | 8002 | `uvicorn stt_main:app --port 8002` |
+| SLR API | 8003 | `uvicorn slr_main:app --port 8003` |
+| Gateway API | 8000 | `uvicorn gateway_main:app --port 8000` |
+| React Frontend | 5173 | `npm run dev` |
+
+Waits 10 seconds for boot, then enters an infinite loop. `Ctrl+C` terminates all processes.
