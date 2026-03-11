@@ -15,6 +15,9 @@ import {
   saveMessage,
   clearSession,
   addContact,
+  lookupUserByUsername,
+  subscribeToMessages,
+  getCurrentProfile,
 } from "../utils/storage";
 import { bridgeApi } from "../api/bridgeApi";
 import { useAccessibility } from "../utils/useAccessibility";
@@ -138,112 +141,92 @@ const ChatApp = () => {
   }, [showThemePicker]);
 
   useEffect(() => {
-    // Check for active login session
-    const token = sessionStorage.getItem("bridge_jwt");
-    const user = sessionStorage.getItem("bridge_username");
-    const profile = sessionStorage.getItem("bridge_user_profile") || "general";
+    let unsubscribeRealtime = null;
 
-    if (!token) {
-      console.log("No token found, bypassing login for demo mode.");
-    }
+    const init = async () => {
+      const user = sessionStorage.getItem("bridge_username");
+      const profile = sessionStorage.getItem("bridge_user_profile") || "general";
 
-    setSessionKey(token || "dummy_bypass_token");
-    setUsername(user || "DemoUser");
-    setUserProfile(
-      profile ? profile.charAt(0).toUpperCase() + profile.slice(1) : "General",
-    );
+      let resolvedUsername = user || "DemoUser";
+      try {
+        const dbProfile = await getCurrentProfile();
+        if (dbProfile?.username) resolvedUsername = dbProfile.username;
+      } catch (e) { /* fallback */ }
 
-    // Auto-set high contrast for blind
-    if (profile.toLowerCase() === "blind") {
-      setCurrentTheme("high-contrast");
-    }
+      setSessionKey("active");
+      setUsername(resolvedUsername);
+      setUserProfile(
+        profile ? profile.charAt(0).toUpperCase() + profile.slice(1) : "General",
+      );
 
-    // Load static contacts
-    getContacts().then((data) => {
-      setContacts(data);
-      setActiveContact(data[0]);
-    });
+      if (profile.toLowerCase() === "blind") {
+        setCurrentTheme("high-contrast");
+      }
 
-    // Load encrypted messages
-    getMessages(token).then((data) => {
-      setMessages(data);
-    });
+      const contactsData = await getContacts();
+      setContacts(contactsData);
+      setActiveContact(contactsData[0]);
 
-    // Initialize WebSocket connection (JWT-authenticated)
-    socketRef.current = bridgeApi.connectWebSocket(async (incomingData) => {
-      const incomingMessage = {
-        sender: incomingData.sender_username || incomingData.from,
-        to: user,
-        text: incomingData.payload,
-        timestamp: Date.now(),
-      };
+      const messagesData = await getMessages();
+      setMessages(messagesData);
 
-      await saveMessage(incomingMessage, token);
-      const updatedMessages = await getMessages(token);
-      setMessages(updatedMessages);
+      // Subscribe to realtime + polling
+      unsubscribeRealtime = subscribeToMessages(resolvedUsername, (incomingMsg) => {
+        setMessages((prev) => [...prev, incomingMsg]);
+        speak(`New message from ${incomingMsg.sender}`);
+      });
+    };
 
-      // Blind: auto-speak incoming
-      speak(`New message from ${incomingMessage.sender}`);
-    });
+    init();
 
     return () => {
-      if (socketRef.current) socketRef.current.close();
+      if (unsubscribeRealtime) unsubscribeRealtime();
     };
   }, [navigate, speak]);
 
   const handleLogout = () => {
     clearSession();
-    sessionStorage.removeItem("bridge_jwt");
-    sessionStorage.removeItem("bridge_user_id");
-    sessionStorage.removeItem("bridge_username");
-    sessionStorage.removeItem("bridge_user_profile");
     navigate("/login");
   };
 
   const handleSendMessage = async (msgObj) => {
     const fullMsg = { ...msgObj, to: activeContact?.name };
 
-    await saveMessage(fullMsg, sessionKey);
-    const updatedMessages = await getMessages(sessionKey);
-    setMessages(updatedMessages);
+    await saveMessage(fullMsg);
+    setMessages((prev) => [...prev, { ...fullMsg, timestamp: Date.now() }]);
 
-    // Emit through WebSocket
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      import("../utils/crypto").then(({ encryptMessage }) => {
-        const wireCipher = encryptMessage(fullMsg.text, sessionKey);
-        socketRef.current.send(
-          JSON.stringify({
-            type: "message",
-            conversation_id: activeContact?.id || "default",
-            payload: wireCipher,
-          }),
-        );
-      });
-    }
-
-    // Mock bot
     if (activeContact?.name === "Bridge AI Assistant") {
       setTimeout(async () => {
         const replyMsg = {
           sender: "Bridge AI Assistant",
           to: username,
-          text: "Hi, I am Bridge — your accessible AI assistant.",
+          text: "Hi, I am Bridge \u2014 your accessible AI assistant.",
           timestamp: Date.now(),
         };
-        await saveMessage(replyMsg, sessionKey);
-        const newMessages = await getMessages(sessionKey);
-        setMessages(newMessages);
+        await saveMessage(replyMsg);
+        setMessages((prev) => [...prev, replyMsg]);
         speak("New message from Bridge AI Assistant");
       }, 1000);
     }
   };
 
   const handleAddContact = async () => {
-    const name = prompt("Enter the exact Username of the contact:");
-    if (name && name.trim()) {
-      const newC = await addContact(name.trim());
-      setContacts((prev) => [...prev, newC]);
-      speak(`Added contact ${name.trim()}`);
+    const contactName = prompt("Enter the username of the person you want to chat with:");
+    if (!contactName || !contactName.trim()) return;
+
+    const found = await lookupUserByUsername(contactName.trim());
+    if (!found) {
+      alert(`No user found with username: "${contactName.trim()}"\nMake sure they have signed up on Bridge.`);
+      return;
+    }
+
+    const newC = await addContact(found.username);
+    if (newC) {
+      setContacts((prev) => {
+        if (prev.some((c) => c.name === newC.name)) return prev;
+        return [...prev, newC];
+      });
+      speak(`Added contact ${found.username}`);
       setActiveContact(newC);
     }
   };
@@ -265,9 +248,8 @@ const ChatApp = () => {
       mediaType: type,
       timestamp: Date.now(),
     };
-    await saveMessage(translatedMsg, sessionKey);
-    const updatedMessages = await getMessages(sessionKey);
-    setMessages(updatedMessages);
+    await saveMessage(translatedMsg);
+    setMessages((prev) => [...prev, translatedMsg]);
 
     if (type === "video") speak("Sign video ready");
   };

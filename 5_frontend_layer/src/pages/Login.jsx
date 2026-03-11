@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Shield, Eye, EyeOff } from "lucide-react";
-import { bridgeApi } from "../api/bridgeApi";
+import { supabase } from "../api/supabaseClient";
 
 const ROLE_PREVIEWS = {
   general: {
@@ -37,12 +37,10 @@ const Login = () => {
   const navigate = useNavigate();
 
   useEffect(() => {
-    // If already authenticated, go to chat
-    const token = sessionStorage.getItem("bridge_jwt");
-    if (token) navigate("/chat");
+    const userId = sessionStorage.getItem("bridge_user_id");
+    if (userId) navigate("/chat");
   }, [navigate]);
 
-  // Auto-select high contrast theme for blind profile
   useEffect(() => {
     if (profile === "blind") {
       document.documentElement.setAttribute("data-theme", "high-contrast");
@@ -60,31 +58,79 @@ const Login = () => {
     setError("");
 
     try {
-      let data;
       if (isLogin) {
-        data = await bridgeApi.login(username.trim(), password);
+        const { data, error: dbError } = await supabase
+          .from("users")
+          .select("*")
+          .eq("username", username.trim())
+          .single();
+
+        if (dbError || !data) {
+          setError("User not found. Please register first.");
+          setLoading(false);
+          return;
+        }
+
+        if (data.password_hash !== password) {
+          setError("Incorrect password.");
+          setLoading(false);
+          return;
+        }
+
+        sessionStorage.setItem("bridge_user_id", data.id);
+        sessionStorage.setItem("bridge_username", data.username);
+        sessionStorage.setItem("bridge_user_profile", data.profile_type);
+
+        if (data.profile_type === "blind") {
+          localStorage.setItem("bridge_theme", "high-contrast");
+        } else if (!localStorage.getItem("bridge_theme")) {
+          localStorage.setItem("bridge_theme", "whatsapp");
+        }
+
+        navigate("/chat");
       } else {
-        data = await bridgeApi.register(username.trim(), password, profile);
+        const { data: existing } = await supabase
+          .from("users")
+          .select("id")
+          .eq("username", username.trim())
+          .single();
+
+        if (existing) {
+          setError("Username already taken. Choose another or sign in.");
+          setLoading(false);
+          return;
+        }
+
+        const { data, error: insertError } = await supabase
+          .from("users")
+          .insert({
+            username: username.trim(),
+            password_hash: password,
+            profile_type: profile,
+          })
+          .select()
+          .single();
+
+        if (insertError) {
+          setError(insertError.message || "Registration failed.");
+          setLoading(false);
+          return;
+        }
+
+        sessionStorage.setItem("bridge_user_id", data.id);
+        sessionStorage.setItem("bridge_username", data.username);
+        sessionStorage.setItem("bridge_user_profile", data.profile_type);
+
+        if (profile === "blind") {
+          localStorage.setItem("bridge_theme", "high-contrast");
+        } else if (!localStorage.getItem("bridge_theme")) {
+          localStorage.setItem("bridge_theme", "whatsapp");
+        }
+
+        navigate("/chat");
       }
-
-      // Store JWT + user info
-      sessionStorage.setItem("bridge_jwt", data.access_token);
-      sessionStorage.setItem("bridge_user_id", data.user_id);
-      sessionStorage.setItem("bridge_username", data.username);
-      sessionStorage.setItem("bridge_user_profile", profile);
-
-      // Set theme for blind users, otherwise default to whatsapp
-      if (profile === "blind") {
-        localStorage.setItem("bridge_theme", "high-contrast");
-      } else if (!localStorage.getItem("bridge_theme")) {
-        localStorage.setItem("bridge_theme", "whatsapp");
-      }
-
-      navigate("/chat");
     } catch (err) {
-      const msg =
-        err.response?.data?.detail || "Something went wrong. Please try again.";
-      setError(msg);
+      setError(err.message || "Something went wrong. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -96,7 +142,6 @@ const Login = () => {
     <div className="login-container">
       <div className="login-card">
         <div className="glass-panel">
-          {/* Logo + Title */}
           <div style={{ textAlign: "center", marginBottom: "1.5rem" }}>
             <div className="login-logo">
               <Shield size={32} />
@@ -109,23 +154,16 @@ const Login = () => {
             </p>
           </div>
 
-          {/* Login / Register Toggle */}
           <div className="auth-toggle">
             <button
               className={isLogin ? "active" : ""}
-              onClick={() => {
-                setIsLogin(true);
-                setError("");
-              }}
+              onClick={() => { setIsLogin(true); setError(""); }}
             >
               Sign In
             </button>
             <button
               className={!isLogin ? "active" : ""}
-              onClick={() => {
-                setIsLogin(false);
-                setError("");
-              }}
+              onClick={() => { setIsLogin(false); setError(""); }}
             >
               Register
             </button>
@@ -149,7 +187,6 @@ const Login = () => {
           )}
 
           <form onSubmit={handleSubmit}>
-            {/* Username */}
             <div className="input-group">
               <label className="input-label">Username</label>
               <input
@@ -163,7 +200,6 @@ const Login = () => {
               />
             </div>
 
-            {/* Password */}
             <div className="input-group">
               <label className="input-label">Password</label>
               <div style={{ position: "relative" }}>
@@ -196,7 +232,6 @@ const Login = () => {
               </div>
             </div>
 
-            {/* Profile Selector (only for register) */}
             {!isLogin && (
               <div className="input-group">
                 <label className="input-label">Accessibility Profile</label>
@@ -214,7 +249,6 @@ const Login = () => {
               </div>
             )}
 
-            {/* Role Preview Card */}
             {!isLogin && preview && (
               <div className="role-preview" key={profile}>
                 <div className="role-preview-icon">{preview.icon}</div>
@@ -225,7 +259,6 @@ const Login = () => {
               </div>
             )}
 
-            {/* Submit Button */}
             <button
               type="submit"
               className="btn btn-primary"
